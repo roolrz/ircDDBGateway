@@ -23,6 +23,7 @@
 #include "Timer.h"
 
 #include <wx/wx.h>
+#include <atomic>
 
 #if defined(__WINDOWS__)
 #include "Inaddr.h"
@@ -46,7 +47,7 @@ private:
 	wxString       m_address;
 	CCacheManager* m_cache;
 	CTimer         m_timer;
-	bool           m_killed;
+	std::atomic<bool> m_killed;
 
 	void process(const wxString& hostname, unsigned int port);
 };

@@ -26,6 +26,7 @@ const wxString CALLSERVER_HOSTNAME = wxT("dns.xreflector.net");
 const unsigned int CALLSERVER_PORT = 20001U;
 
 const unsigned int TCP_TIMEOUT = 10U;
+const unsigned int DOWNLOAD_TIMEOUT = 30U;
 
 CCallsignServer::CCallsignServer(const wxString& callsign, const wxString& address, CCacheManager* cache) :
 wxThread(wxTHREAD_JOINABLE),
@@ -45,8 +46,7 @@ CCallsignServer::~CCallsignServer()
 
 void CCallsignServer::start()
 {
-	process(CALLSERVER_HOSTNAME, CALLSERVER_PORT);
-
+	// Directory availability must never block the gateway receive loop.
 	Create();
 	Run();
 }
@@ -55,9 +55,10 @@ void* CCallsignServer::Entry()
 {
 	wxLogMessage(wxT("Starting the Callsign Server thread"));
 
-	m_timer.start();
-
 	try {
+		process(CALLSERVER_HOSTNAME, CALLSERVER_PORT);
+		m_timer.start();
+
 		while (!m_killed) {
 			if (m_timer.hasExpired()) {
 				process(CALLSERVER_HOSTNAME, CALLSERVER_PORT);
@@ -110,20 +111,43 @@ void CCallsignServer::process(const wxString& hostname, unsigned int port)
 
 	::memcpy(buffer + 9U, "ircDDB Gateway", 14U);
 
-	socket.write(buffer, 29U);
+	if (!socket.write(buffer, 29U)) {
+		delete[] buffer;
+		socket.close();
+		return;
+	}
 
 	unsigned int offset = 0U;
+	wxStopWatch elapsed;
+	wxStopWatch idle;
+	bool complete = false;
 
-	int n = socket.read(buffer, length, TCP_TIMEOUT);
-	if (n >= 0)
-		offset += n;
+	// Poll so shutdown remains responsive. Bound both idle time and the
+	// entire download: a silent or trickling server must not hold us forever.
+	while (!m_killed && offset < length) {
+		if (idle.Time() >= TCP_TIMEOUT * 1000L || elapsed.Time() >= DOWNLOAD_TIMEOUT * 1000L) {
+			wxLogWarning(wxT("Callsign directory download from %s timed out; keeping cached reflectors"), hostname.c_str());
+			break;
+		}
 
-	while (n >= 0 && offset < length) {
-		n = socket.read(buffer + offset, length - offset, TCP_TIMEOUT);
-		if (n == 0)
-			Sleep(TCP_TIMEOUT * 1000UL);
-		else if (n > 0)
+		int n = socket.read(buffer + offset, length - offset, 1U);
+		if (n == -2) {
+			complete = true; // The server closed the completed response.
+			break;
+		}
+		if (n < 0)
+			break;
+		if (n > 0) {
 			offset += n;
+			idle.Start();
+		}
+	}
+
+	if (!complete || m_killed) {
+		// Do not apply a partial or oversized directory to the live cache.
+		delete[] buffer;
+		socket.close();
+		return;
 	}
 
 	buffer[offset] = 0x00U;
